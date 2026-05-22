@@ -31,6 +31,47 @@ jobs:
             scons-flags: debug_symbols=no
             bin: ./bin/godot.macos.template_release.universal
 
+          - name: Editor with doubles (target=editor, precision=double)
+            cache-name: macos-editor-double
+            target: editor
+            scons-flags: precision=double
+            precision-suffix: .double
+            bin: ./bin/godot.macos.editor.double.universal
+
+          - name: Template with doubles (target=template_release, precision=double)
+            cache-name: macos-template-double
+            target: template_release
+            scons-flags: debug_symbols=no precision=double
+            precision-suffix: .double
+            bin: ./bin/godot.macos.template_release.double.universal
+
+          - name: Editor w/ Mono and doubles (target=editor, module_mono_enabled=yes, precision=double)
+            cache-name: macos-editor-mono-double
+            target: editor
+            scons-flags: module_mono_enabled=yes precision=double
+            precision-suffix: .double
+            mono-suffix: .mono
+            bin: ./bin/godot.macos.editor.double.universal.mono
+            build-mono: true
+            dotnet-version: 10.0.x
+            mono-build-args: --precision=double --no-deprecated --push-nupkgs-local=./bin/nupkgs
+
+          - name: Template w/ Mono and doubles, release (target=template_release, module_mono_enabled=yes, precision=double)
+            cache-name: macos-template-mono-double
+            target: template_release
+            scons-flags: debug_symbols=no module_mono_enabled=yes precision=double
+            precision-suffix: .double
+            mono-suffix: .mono
+            bin: ./bin/godot.macos.template_release.double.universal.mono
+
+          - name: Template w/ Mono and doubles, debug (target=template_debug, module_mono_enabled=yes, precision=double)
+            cache-name: macos-template-mono-double-debug
+            target: template_debug
+            scons-flags: debug_symbols=no module_mono_enabled=yes precision=double
+            precision-suffix: .double
+            mono-suffix: .mono
+            bin: ./bin/godot.macos.template_debug.double.universal.mono
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -72,6 +113,12 @@ jobs:
           fi
         continue-on-error: true
 
+      - name: Setup .NET SDK
+        if: matrix.build-mono
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ matrix.dotnet-version }}
+
       - name: Compilation (x86_64)
         uses: ./.github/actions/godot-build
         with:
@@ -92,10 +139,25 @@ jobs:
           cache-name: ${{ matrix.cache-name }}
         continue-on-error: true
 
+      - name: Create universal binary
+        run: |
+          lipo -create ./bin/godot.macos.${{ matrix.target }}${{ matrix.precision-suffix }}.x86_64${{ matrix.mono-suffix }} ./bin/godot.macos.${{ matrix.target }}${{ matrix.precision-suffix }}.arm64${{ matrix.mono-suffix }} -output ./bin/godot.macos.${{ matrix.target }}${{ matrix.precision-suffix }}.universal${{ matrix.mono-suffix }}
+          rm ./bin/godot.macos.${{ matrix.target }}${{ matrix.precision-suffix }}.x86_64${{ matrix.mono-suffix }} ./bin/godot.macos.${{ matrix.target }}${{ matrix.precision-suffix }}.arm64${{ matrix.mono-suffix }}
+          chmod +x ${{ matrix.bin }}
+
+      - name: Generate C# glue
+        if: matrix.build-mono
+        run: |
+          ${{ matrix.bin }} --headless --generate-mono-glue ./modules/mono/glue
+
+      - name: Build .NET solutions
+        if: matrix.build-mono
+        run: |
+          dotnet --info
+          ./modules/mono/build_scripts/build_assemblies.py --godot-output-dir=./bin --godot-platform=macos --werror ${{ matrix.mono-build-args }}
+
       - name: Prepare artifact
         run: |
-          lipo -create ./bin/godot.macos.${{ matrix.target }}.x86_64 ./bin/godot.macos.${{ matrix.target }}.arm64 -output ./bin/godot.macos.${{ matrix.target }}.universal
-          rm ./bin/godot.macos.${{ matrix.target }}.x86_64 ./bin/godot.macos.${{ matrix.target }}.arm64
           strip bin/godot.*
           chmod +x bin/godot.*
 
