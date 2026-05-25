@@ -1,0 +1,526 @@
+name: 📦 Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  SCONS_FLAGS: >-
+    dev_mode=yes
+    module_text_server_fb_enabled=yes
+    "accesskit_sdk_path=${{ github.workspace }}/accesskit-c-0.21.2/"
+
+jobs:
+  # Platform build jobs (Tasks 2-4) and create-release (Tasks 5-7) appended below.
+  build-linux:
+    name: 🐧 Linux ${{ matrix.name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: Editor mono+double
+            cache-name: release-linux-editor-mono-double
+            target: editor
+            bin: ./bin/godot.linuxbsd.editor.double.x86_64.mono
+            build-mono: true
+            mono-build-args: --precision=double --no-deprecated --push-nupkgs-local=./bin/nupkgs
+
+          - name: Template release mono+double
+            cache-name: release-linux-template-release-mono-double
+            target: template_release
+            bin: ./bin/godot.linuxbsd.template_release.double.x86_64.mono
+
+          - name: Template debug mono+double
+            cache-name: release-linux-template-debug-mono-double
+            target: template_debug
+            bin: ./bin/godot.linuxbsd.template_debug.double.x86_64.mono
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install libwayland-bin
+
+      - name: Free disk space on runner
+        run: |
+          sudo rm -rf /usr/local/lib/android
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      - name: Force remove preinstalled .NET SDKs
+        if: matrix.build-mono
+        run: |
+          sudo rm -rf /usr/share/dotnet/sdk/*
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download pre-built AccessKit
+        uses: dsaltares/fetch-gh-release-asset@1.1.2
+        with:
+          repo: godotengine/godot-accesskit-c-static
+          version: tags/0.21.2
+          file: accesskit-c-0.21.2.zip
+          target: accesskit-c-0.21.2/accesskit_c.zip
+
+      - name: Extract pre-built AccessKit
+        run: unzip -o accesskit-c-0.21.2/accesskit_c.zip
+
+      - name: Compilation
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: ${{ env.SCONS_FLAGS }} module_mono_enabled=yes precision=double
+          platform: linuxbsd
+          target: ${{ matrix.target }}
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Generate C# glue (editor only)
+        if: matrix.build-mono
+        run: |
+          ${{ matrix.bin }} --headless --generate-mono-glue ./modules/mono/glue
+
+      - name: Build .NET solutions (editor only)
+        if: matrix.build-mono
+        run: |
+          dotnet --info
+          ./modules/mono/build_scripts/build_assemblies.py --godot-output-dir=./bin --godot-platform=linuxbsd --werror ${{ matrix.mono-build-args }}
+
+      - name: Prepare artifact
+        run: |
+          strip bin/godot.*
+          chmod +x bin/godot.*
+
+      - name: Upload artifact
+        uses: ./.github/actions/upload-artifact
+        with:
+          name: ${{ matrix.cache-name }}
+
+  build-macos:
+    name: 🍎 macOS ${{ matrix.name }}
+    runs-on: macos-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: Editor mono+double
+            cache-name: release-macos-editor-mono-double
+            target: editor
+            scons-flags: module_mono_enabled=yes precision=double
+            bin: ./bin/godot.macos.editor.double.universal.mono
+            build-mono: true
+            mono-build-args: --precision=double --no-deprecated
+
+          - name: Template release mono+double
+            cache-name: release-macos-template-release-mono-double
+            target: template_release
+            scons-flags: debug_symbols=no module_mono_enabled=yes precision=double
+            bin: ./bin/godot.macos.template_release.double.universal.mono
+
+          - name: Template debug mono+double
+            cache-name: release-macos-template-debug-mono-double
+            target: template_debug
+            scons-flags: debug_symbols=no module_mono_enabled=yes precision=double
+            bin: ./bin/godot.macos.template_debug.double.universal.mono
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.0.1.app
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      - name: Download pre-built AccessKit
+        uses: dsaltares/fetch-gh-release-asset@1.1.2
+        with:
+          repo: godotengine/godot-accesskit-c-static
+          version: tags/0.21.2
+          file: accesskit-c-0.21.2.zip
+          target: accesskit-c-0.21.2/accesskit_c.zip
+
+      - name: Extract pre-built AccessKit
+        run: unzip -o accesskit-c-0.21.2/accesskit_c.zip
+
+      - name: Setup Vulkan SDK
+        id: vulkan-sdk
+        run: |
+          if sh misc/scripts/install_vulkan_sdk_macos.sh; then
+            echo "VULKAN_ENABLED=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::macOS: Vulkan SDK installation failed, building without Vulkan support."
+            echo "VULKAN_ENABLED=no" >> "$GITHUB_OUTPUT"
+          fi
+        continue-on-error: true
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Compilation (x86_64)
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: ${{ env.SCONS_FLAGS }} ${{ matrix.scons-flags }} arch=x86_64 vulkan=${{ steps.vulkan-sdk.outputs.VULKAN_ENABLED }}
+          platform: macos
+          target: ${{ matrix.target }}
+
+      - name: Compilation (arm64)
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: ${{ env.SCONS_FLAGS }} ${{ matrix.scons-flags }} arch=arm64 vulkan=${{ steps.vulkan-sdk.outputs.VULKAN_ENABLED }}
+          platform: macos
+          target: ${{ matrix.target }}
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Create universal binary
+        run: |
+          lipo -create ./bin/godot.macos.${{ matrix.target }}.double.x86_64.mono ./bin/godot.macos.${{ matrix.target }}.double.arm64.mono -output ${{ matrix.bin }}
+          rm ./bin/godot.macos.${{ matrix.target }}.double.x86_64.mono ./bin/godot.macos.${{ matrix.target }}.double.arm64.mono
+          chmod +x ${{ matrix.bin }}
+
+      - name: Generate C# glue (editor only)
+        if: matrix.build-mono
+        run: |
+          ${{ matrix.bin }} --headless --generate-mono-glue ./modules/mono/glue
+
+      - name: Build .NET solutions (editor only)
+        if: matrix.build-mono
+        run: |
+          dotnet --info
+          ./modules/mono/build_scripts/build_assemblies.py --godot-output-dir=./bin --godot-platform=macos --werror ${{ matrix.mono-build-args }}
+
+      - name: Prepare artifact
+        run: |
+          strip bin/godot.*
+          chmod +x bin/godot.*
+
+      - name: Upload artifact
+        uses: ./.github/actions/upload-artifact
+        with:
+          name: ${{ matrix.cache-name }}
+
+  build-windows:
+    name: 🏁 Windows ${{ matrix.name }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      SCONS_CACHE_MSVC_CONFIG: true
+      PYTHONIOENCODING: utf8
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: Editor mono+double
+            cache-name: release-windows-editor-mono-double
+            target: editor
+            scons-flags: >-
+              windows_subsystem=console
+              module_mono_enabled=yes
+              precision=double
+            bin: ./bin/godot.windows.editor.double.x86_64.mono.exe
+            build-mono: true
+            mono-build-args: --precision=double --no-deprecated
+
+          - name: Template release mono+double
+            cache-name: release-windows-template-release-mono-double
+            target: template_release
+            scons-flags: module_mono_enabled=yes precision=double
+            bin: ./bin/godot.windows.template_release.double.x86_64.mono.console.exe
+
+          - name: Template debug mono+double
+            cache-name: release-windows-template-debug-mono-double
+            target: template_debug
+            scons-flags: module_mono_enabled=yes precision=double
+            bin: ./bin/godot.windows.template_debug.double.x86_64.mono.console.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      - name: Download Direct3D 12 SDK components
+        shell: sh
+        id: d3d12-sdk
+        run: |
+          if python ./misc/scripts/install_d3d12_sdk_windows.py; then
+            echo "D3D12_ENABLED=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Windows: Direct3D 12 SDK installation failed, building without Direct3D 12 support."
+            echo "D3D12_ENABLED=no" >> "$GITHUB_OUTPUT"
+          fi
+        continue-on-error: true
+
+      - name: Download pre-built ANGLE static libraries
+        uses: dsaltares/fetch-gh-release-asset@1.1.2
+        with:
+          repo: godotengine/godot-angle-static
+          version: tags/chromium/6601.2
+          file: godot-angle-static-x86_64-msvc-release.zip
+          target: angle/angle.zip
+
+      - name: Extract pre-built ANGLE static libraries
+        run: Expand-Archive -Force angle/angle.zip ${{ github.workspace }}/
+
+      - name: Download pre-built AccessKit
+        uses: dsaltares/fetch-gh-release-asset@1.1.2
+        with:
+          repo: godotengine/godot-accesskit-c-static
+          version: tags/0.21.2
+          file: accesskit-c-0.21.2.zip
+          target: accesskit-c-0.21.2/accesskit_c.zip
+
+      - name: Extract pre-built AccessKit
+        run: unzip -o accesskit-c-0.21.2/accesskit_c.zip
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Compilation
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: >-
+            dev_mode=yes
+            module_text_server_fb_enabled=yes
+            debug_symbols=no
+            "angle_libs=${{ github.workspace }}/"
+            "accesskit_sdk_path=${{ github.workspace }}/accesskit-c-0.21.2/"
+            ${{ matrix.scons-flags }}
+            d3d12=${{ steps.d3d12-sdk.outputs.D3D12_ENABLED }}
+          platform: windows
+          target: ${{ matrix.target }}
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Generate C# glue (editor only)
+        if: matrix.build-mono
+        run: |
+          ${{ matrix.bin }} --headless --generate-mono-glue ./modules/mono/glue
+
+      - name: Build .NET solutions (editor only)
+        if: matrix.build-mono
+        shell: pwsh
+        run: |
+          dotnet --info
+          python ./modules/mono/build_scripts/build_assemblies.py --godot-output-dir=./bin --godot-platform=windows --werror ${{ matrix.mono-build-args }}
+
+      - name: Prepare artifact
+        run: |
+          Remove-Item bin/* -Include *.exp,*.lib,*.pdb -Force
+
+      - name: Upload artifact
+        uses: ./.github/actions/upload-artifact
+        with:
+          name: ${{ matrix.cache-name }}
+
+  create-release:
+    name: 📦 Create GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [build-linux, build-macos, build-windows]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          set -euo pipefail
+          REF="${{ github.ref_name }}"
+          if [[ "${REF}" != v* ]]; then
+            echo "::error::release workflow must be triggered from a 'v*' tag, got '${REF}'"
+            exit 1
+          fi
+          VERSION="${REF#v}"
+          BASE_VERSION="${VERSION%%-*}"
+          echo "tag=${REF}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "base_version=${BASE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${REF} version=${VERSION} base_version=${BASE_VERSION}"
+
+      - name: Fail if release already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::Release for tag ${TAG} already exists. Delete it manually before re-running."
+            exit 1
+          fi
+          echo "No existing release for ${TAG}, proceeding."
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          pattern: release-*
+          merge-multiple: false
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          set -euo pipefail
+          BASE="${{ steps.version.outputs.base_version }}"
+          CHANGELOG=CHANGELOG.md
+          if [ ! -f "$CHANGELOG" ]; then
+            echo "::error::CHANGELOG.md not found at repo root"
+            exit 1
+          fi
+          # Extract lines from "## <BASE> " up to (but not including) the next "## " header.
+          awk -v base="$BASE" '
+            BEGIN { in_section = 0 }
+            /^## / {
+              if (in_section) { exit }
+              if ($2 == base) { in_section = 1; print; next }
+            }
+            in_section { print }
+          ' "$CHANGELOG" > ./release-notes.md
+
+          if [ ! -s ./release-notes.md ]; then
+            echo "::error::No CHANGELOG.md section found for version ${BASE}. Add a '## ${BASE} - <date>' section before tagging."
+            exit 1
+          fi
+
+          echo "--- Extracted release notes ---"
+          cat ./release-notes.md
+          echo "--- End ---"
+
+      - name: Stage release assets
+        id: stage
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p ./assets
+
+          stage_binary() {
+            local artifact_dir="$1"     # e.g. ./artifacts/release-linux-editor-mono-double
+            local internal_name="$2"    # e.g. godot.linuxbsd.editor.double.x86_64.mono
+            local public_name="$3"      # e.g. Godot_4.6.4-stable_mono_double_linux.x86_64.editor
+
+            local src="${artifact_dir}/${internal_name}"
+            if [ ! -f "$src" ]; then
+              echo "::error::Expected binary missing: ${src}"
+              ls -la "${artifact_dir}" || true
+              exit 1
+            fi
+            local tmp
+            tmp="$(mktemp -d)"
+            cp "$src" "${tmp}/${internal_name}"
+            (cd "$tmp" && zip -q "${GITHUB_WORKSPACE}/assets/${public_name}.zip" "${internal_name}")
+            rm -rf "$tmp"
+            echo "Staged: assets/${public_name}.zip"
+          }
+
+          # Linux
+          stage_binary ./artifacts/release-linux-editor-mono-double           godot.linuxbsd.editor.double.x86_64.mono           "Godot_${VERSION}_mono_double_linux.x86_64.editor"
+          stage_binary ./artifacts/release-linux-template-release-mono-double godot.linuxbsd.template_release.double.x86_64.mono "Godot_${VERSION}_mono_double_linux.x86_64.template_release"
+          stage_binary ./artifacts/release-linux-template-debug-mono-double   godot.linuxbsd.template_debug.double.x86_64.mono   "Godot_${VERSION}_mono_double_linux.x86_64.template_debug"
+
+          # macOS
+          stage_binary ./artifacts/release-macos-editor-mono-double           godot.macos.editor.double.universal.mono           "Godot_${VERSION}_mono_double_macos.universal.editor"
+          stage_binary ./artifacts/release-macos-template-release-mono-double godot.macos.template_release.double.universal.mono "Godot_${VERSION}_mono_double_macos.universal.template_release"
+          stage_binary ./artifacts/release-macos-template-debug-mono-double   godot.macos.template_debug.double.universal.mono   "Godot_${VERSION}_mono_double_macos.universal.template_debug"
+
+          # Windows
+          stage_binary ./artifacts/release-windows-editor-mono-double           godot.windows.editor.double.x86_64.mono.exe                   "Godot_${VERSION}_mono_double_win64.editor"
+          stage_binary ./artifacts/release-windows-template-release-mono-double godot.windows.template_release.double.x86_64.mono.console.exe "Godot_${VERSION}_mono_double_win64.template_release"
+          stage_binary ./artifacts/release-windows-template-debug-mono-double   godot.windows.template_debug.double.x86_64.mono.console.exe   "Godot_${VERSION}_mono_double_win64.template_debug"
+
+          # NuGet packages — picked from the linux-editor artifact (cross-platform, identical across OSes).
+          NUPKG_SRC="./artifacts/release-linux-editor-mono-double/nupkgs"
+          if [ ! -d "$NUPKG_SRC" ]; then
+            # Fallback: build_assemblies.py also copies to GodotSharp/Tools/nupkgs via Directory.Build.targets.
+            NUPKG_SRC="./artifacts/release-linux-editor-mono-double/GodotSharp/Tools/nupkgs"
+          fi
+          if [ ! -d "$NUPKG_SRC" ]; then
+            echo "::error::No nupkg directory found in linux-editor artifact (checked nupkgs/ and GodotSharp/Tools/nupkgs/)"
+            find ./artifacts/release-linux-editor-mono-double -name '*.nupkg' -o -name '*.snupkg' || true
+            exit 1
+          fi
+          NUPKG_COUNT=$(find "$NUPKG_SRC" -maxdepth 1 \( -name '*.nupkg' -o -name '*.snupkg' \) | wc -l)
+          if [ "$NUPKG_COUNT" -eq 0 ]; then
+            echo "::error::No .nupkg files in ${NUPKG_SRC}"
+            exit 1
+          fi
+          cp "$NUPKG_SRC"/*.nupkg ./assets/ 2>/dev/null || true
+          cp "$NUPKG_SRC"/*.snupkg ./assets/ 2>/dev/null || true
+          echo "Staged ${NUPKG_COUNT} nupkg files."
+
+          echo "--- Final asset list ---"
+          ls -la ./assets/
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --draft \
+            --title "Godot ${VERSION} (mono+double)" \
+            --notes-file ./release-notes.md \
+            --target "${{ github.sha }}" \
+            ./assets/*
