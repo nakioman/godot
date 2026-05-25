@@ -457,6 +457,7 @@ jobs:
             local artifact_dir="$1"     # e.g. ./artifacts/release-linux-editor-mono-double
             local internal_name="$2"    # e.g. godot.linuxbsd.editor.double.x86_64.mono
             local public_name="$3"      # e.g. Godot_4.6.4-stable_mono_double_linux.x86_64.editor
+            local include_godotsharp="${4:-no}"  # "yes" to bundle the GodotSharp/ folder alongside the binary
 
             local src="${artifact_dir}/${internal_name}"
             if [ ! -f "$src" ]; then
@@ -467,23 +468,34 @@ jobs:
             local tmp
             tmp="$(mktemp -d)"
             cp "$src" "${tmp}/${internal_name}"
-            (cd "$tmp" && zip -q "${GITHUB_WORKSPACE}/assets/${public_name}.zip" "${internal_name}")
+            if [ "$include_godotsharp" = "yes" ]; then
+              local godotsharp_src="${artifact_dir}/GodotSharp"
+              if [ ! -d "$godotsharp_src" ]; then
+                echo "::error::Expected GodotSharp/ directory missing: ${godotsharp_src}"
+                ls -la "${artifact_dir}" || true
+                exit 1
+              fi
+              cp -R "$godotsharp_src" "${tmp}/GodotSharp"
+              (cd "$tmp" && zip -qr "${GITHUB_WORKSPACE}/assets/${public_name}.zip" "${internal_name}" GodotSharp)
+            else
+              (cd "$tmp" && zip -q "${GITHUB_WORKSPACE}/assets/${public_name}.zip" "${internal_name}")
+            fi
             rm -rf "$tmp"
             echo "Staged: assets/${public_name}.zip"
           }
 
           # Linux
-          stage_binary ./artifacts/release-linux-editor-mono-double           godot.linuxbsd.editor.double.x86_64.mono           "Godot_${VERSION}_mono_double_linux.x86_64.editor"
+          stage_binary ./artifacts/release-linux-editor-mono-double           godot.linuxbsd.editor.double.x86_64.mono           "Godot_${VERSION}_mono_double_linux.x86_64.editor"           yes
           stage_binary ./artifacts/release-linux-template-release-mono-double godot.linuxbsd.template_release.double.x86_64.mono "Godot_${VERSION}_mono_double_linux.x86_64.template_release"
           stage_binary ./artifacts/release-linux-template-debug-mono-double   godot.linuxbsd.template_debug.double.x86_64.mono   "Godot_${VERSION}_mono_double_linux.x86_64.template_debug"
 
           # macOS
-          stage_binary ./artifacts/release-macos-editor-mono-double           godot.macos.editor.double.universal.mono           "Godot_${VERSION}_mono_double_macos.universal.editor"
+          stage_binary ./artifacts/release-macos-editor-mono-double           godot.macos.editor.double.universal.mono           "Godot_${VERSION}_mono_double_macos.universal.editor"           yes
           stage_binary ./artifacts/release-macos-template-release-mono-double godot.macos.template_release.double.universal.mono "Godot_${VERSION}_mono_double_macos.universal.template_release"
           stage_binary ./artifacts/release-macos-template-debug-mono-double   godot.macos.template_debug.double.universal.mono   "Godot_${VERSION}_mono_double_macos.universal.template_debug"
 
           # Windows
-          stage_binary ./artifacts/release-windows-editor-mono-double           godot.windows.editor.double.x86_64.mono.exe                   "Godot_${VERSION}_mono_double_win64.editor"
+          stage_binary ./artifacts/release-windows-editor-mono-double           godot.windows.editor.double.x86_64.mono.exe                   "Godot_${VERSION}_mono_double_win64.editor"           yes
           stage_binary ./artifacts/release-windows-template-release-mono-double godot.windows.template_release.double.x86_64.mono.console.exe "Godot_${VERSION}_mono_double_win64.template_release"
           stage_binary ./artifacts/release-windows-template-debug-mono-double   godot.windows.template_debug.double.x86_64.mono.console.exe   "Godot_${VERSION}_mono_double_win64.template_debug"
 
